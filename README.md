@@ -6,11 +6,10 @@ This project demonstrates a multi-threaded memory stress test program in C++ des
 
 1. [Overview](#overview)  
 2. [Requirements](#requirements)  
-3. [Building](#building)  
-4. [Running](#running)  
-5. [Configuration](#configuration)  
-6. [Experimenting Further](#experimenting-further)  
-7. [What the Test Does](#what-the-test-does)  
+3. [Build & Run](#build&run)   
+4. [Configuration](#configuration)  
+5. [Experimenting Further](#experimenting-further)  
+6. [What the Test Does](#what-the-test-does)  
 
 ---
 
