@@ -5,7 +5,8 @@
 #include <atomic>
 #include <algorithm>  
 #include <random>    
-#include <iomanip>  
+#include <iomanip>
+#include <numeric>
 #include <cstring>    
 
 // # of threads to spawn
