@@ -45,7 +45,7 @@ jobs:
       id: strings
       shell: bash
       run: |
-        echo "build-output-dir=${{ github.workspace }}/build" >> "$GITHUB_OUTPUT"
+        echo "build-output-dir=${GITHUB_WORKSPACE}/build" >> $GITHUB_OUTPUT
 
     - name: Configure CMake
       run: >
@@ -61,20 +61,27 @@ jobs:
     - name: Test
       working-directory: ${{ steps.strings.outputs.build-output-dir }}
       run: ctest --build-config ${{ matrix.build_type }}
-
+      
+    - name: Debug build directory
+      shell: bash
+      run: |
+        echo ">>> Listing build directory: '${{ steps.strings.outputs.build-output-dir }}'"
+        ls -R "${{ steps.strings.outputs.build-output-dir }}"
+        echo ">>> Searching for executable files:"
+        find "${{ steps.strings.outputs.build-output-dir }}" -type f -executable
+    
     - name: Run program and compare output
       shell: bash
       run: |
-        # Change into your build directory
-        cd ${{ steps.strings.outputs.build-output-dir }}
-
+        echo "Going to: '${{ steps.strings.outputs.build-output-dir }}'"
+        cd "${{ steps.strings.outputs.build-output-dir }}"
+        
         echo "Running program..."
 
-        # Detect OS and run the program accordingly
         if [[ "$RUNNER_OS" == "Windows" ]]; then
-          .\${{ matrix.build_type }}\my_program.exe > program_output.log
+          ./Release/my_program.exe > program_output.log
         else
-          chmod +x my_program || true  # Ensure executable permissions (if needed)
+          chmod +x ./my_program || true  # or ./Release/my_program if it ends up in 'Release'
           ./my_program > program_output.log
         fi
 
@@ -82,9 +89,6 @@ jobs:
         cat program_output.log
         echo "--------------------------"
 
-        echo "Comparing output with expected lines..."
-
-        # Example line-by-line comparisons:
         grep -q "Memory Stress Test" program_output.log || (echo "Missing 'Memory Stress Test'" && exit 1)
         grep -q "Buffer size    : 536870912 bytes" program_output.log || (echo "Buffer size line mismatch" && exit 1)
         grep -q "Iterations     : 10" program_output.log || (echo "Iterations line mismatch" && exit 1)
@@ -95,4 +99,3 @@ jobs:
         grep -q "Throughput            :" program_output.log || (echo "Missing 'Throughput' line" && exit 1)
 
         echo "Output successfully matched expected reference!"
-
