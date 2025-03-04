@@ -63,16 +63,18 @@ jobs:
       run: ctest --build-config ${{ matrix.build_type }}
 
     - name: Run program and compare output
+      shell: bash
       run: |
         # Change into your build directory
         cd ${{ steps.strings.outputs.build-output-dir }}
 
         echo "Running program..."
-        # On Windows, your exe is typically under .\Release\ if using Visual Studio generators
-        # On Linux, your binary is typically right in the build folder (or subfolder) 
-        if [ "${{ runner.os }}" = "Windows" ]; then
-          .\\${{ matrix.build_type }}\\my_program.exe > program_output.log
+
+        # Detect OS and run the program accordingly
+        if [[ "$RUNNER_OS" == "Windows" ]]; then
+          .\${{ matrix.build_type }}\my_program.exe > program_output.log
         else
+          chmod +x my_program || true  # Ensure executable permissions (if needed)
           ./my_program > program_output.log
         fi
 
@@ -89,9 +91,8 @@ jobs:
         grep -q "Threads        : 8" program_output.log || (echo "Threads line mismatch" && exit 1)
         grep -q "Access pattern : Sequential" program_output.log || (echo "Access pattern line mismatch" && exit 1)
         grep -q "Total bytes processed : 10737418240.00 bytes" program_output.log || (echo "Total bytes processed mismatch" && exit 1)
-        # Numeric values (elapsed time, throughput) may vary from run to run. 
-        # If you have a tolerance, parse the numbers more carefully or do a partial string check:
         grep -q "Elapsed time          :" program_output.log || (echo "Missing 'Elapsed time' line" && exit 1)
         grep -q "Throughput            :" program_output.log || (echo "Missing 'Throughput' line" && exit 1)
 
         echo "Output successfully matched expected reference!"
+
