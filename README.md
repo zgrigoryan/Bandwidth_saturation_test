@@ -6,10 +6,11 @@ This project demonstrates a multi-threaded memory stress test program in C++ des
 
 1. [Overview](#overview)  
 2. [Requirements](#requirements)  
-3. [Build & Run](#build&run)   
+3. [Build & Run](#build--run)  
 4. [Configuration](#configuration)  
 5. [Experimenting Further](#experimenting-further)  
 6. [What the Test Does](#what-the-test-does)  
+7. [Profiling & Analysis](#profiling--analysis)  
 
 ---
 
@@ -33,13 +34,10 @@ This project demonstrates a multi-threaded memory stress test program in C++ des
 
 1. **Clone or download** this repository.  
 2. **Open a terminal** in the directory containing the `main.cpp` file.  
-3. **Compile** with optimizations for best results, for example using `g++`:
+3. **Compile** with optimizations for best results:
    ```bash
    g++ -std=c++17 -O3 main.cpp -o main
-   ```
-   This produces an executable named `main`.
-
-> **Note**: Using `-O3` or `-O2` optimization flags can significantly affect throughput measurements.
+````
 
 From the terminal, run:
 
@@ -51,10 +49,6 @@ This runs the program in **sequential access** mode by default. To enable **rand
 
 ```bash
 ./main --random
-```
-or
-```bash
-./main -r
 ```
 
 ### Example Output
@@ -78,45 +72,95 @@ Throughput            : 8179.87 MB/s
 
 You can modify these constants in `main.cpp` to change behavior:
 
-- **`NUM_THREADS`**: Number of threads (default: 8)  
-- **`BUFFER_SIZE`**: Size of the large buffer (default: 512 MB). You can switch to 1 GB or 2 GB by adjusting:
+* **`NUM_THREADS`**: Number of threads (default: 8)
+* **`BUFFER_SIZE`**: Size of the large buffer (default: 512 MB). You can switch to 1 GB or 2 GB by adjusting:
+
   ```cpp
   static const size_t BUFFER_SIZE = 1024ull * 1024ull * 1024ull; // 1 GB
   ```
-- **`ITERATIONS`**: Number of times each thread repeats the read/write pattern.  
+* **`ITERATIONS`**: Number of times each thread repeats the read/write pattern.
 
 ---
 
 ## Experimenting Further
 
-1. **Change `NUM_THREADS`**:  
-   - Observe how throughput scales as you add more threads. Initially, performance may increase, but beyond a certain point, you’ll likely see diminishing returns due to the memory bus becoming saturated.
+1. **Change `NUM_THREADS`**:
+   Observe how throughput scales with more threads. After a point, increasing threads causes memory bandwidth saturation.
 
-2. **Adjust `BUFFER_SIZE`**:  
-   - Try 256 MB, 512 MB, 1 GB, 2 GB, etc. Once the buffer is larger than the last-level cache (LLC), random accesses often incur more cache misses.
+2. **Adjust `BUFFER_SIZE`**:
+   Try values above your CPU’s last-level cache (LLC) size to see the effect on cache miss rates.
 
-3. **Random vs. Sequential**:  
-   - Compare throughput in sequential mode vs. random mode (`--random`). You’ll likely see lower throughput with random accesses due to less effective prefetching and more cache misses.
+3. **Random vs. Sequential Access**:
+   Compare throughput with:
 
-4. **Test on Different Hardware**:  
-   - Run on machines with different CPU, memory speed, and cache sizes. Compare how the memory bandwidth limits differ.
+   ```bash
+   ./main       # Sequential
+   ./main -r    # Random
+   ```
+
+   Random accesses reduce prefetching efficiency and increase cache misses.
+
+4. **Run on Different Hardware**:
+   Try this test on different CPUs to study memory architecture and bandwidth limitations.
 
 ---
 
 ## What the Test Does
 
-1. **Initial Setup**:  
-   - Allocates a large buffer (`std::vector<char>`) of size `BUFFER_SIZE`.  
-   - Spawns `NUM_THREADS` threads, each assigned a chunk of the buffer.
+1. **Initial Setup**:
+   Allocates a shared memory buffer and launches multiple threads.
 
-2. **Memory Operations**:  
-   - Each thread runs a loop for `ITERATIONS`.  
-   - **Read Phase**: It reads all bytes in its chunk (either sequentially or in a random order) and sums them into a `volatile` variable to prevent compiler optimization.  
-   - **Write Phase**: It writes a simple pattern (the current index as a `char`) to every element in its chunk.
+2. **Thread Workload**:
+   Each thread performs repeated read/write operations on its chunk, either sequentially or randomly.
 
-3. **Throughput Calculation**:  
-   - Each thread reports the total bytes processed (`2 * chunk_size` per iteration—one for read, one for write).  
-   - The main thread sums these totals in an atomic variable and divides by elapsed time (in seconds) to get bytes/s.  
-   - Finally, it converts bytes/s to MB/s (`1 MB = 1024 * 1024` bytes) and prints results.
+3. **Throughput Measurement**:
+   All threads' workloads are timed and summed. Final output shows total bytes processed and throughput in MB/s.
 
-By running this test, you can witness the **von Neumann bottleneck** in action. Even though CPUs can do many operations in parallel, they share the same memory bus to fetch data (and instructions). As you scale up threads or use random access, you put more pressure on the memory subsystem, eventually hitting a throughput ceiling determined by the hardware’s maximum memory bandwidth.
+---
+
+## Profiling & Analysis
+
+I profiled the program on **macOS (M2 chip)** using **Xcode Instruments**, focusing on CPU usage and runtime behavior.
+
+### 🔥 Runtime Breakdown
+
+#### Run 1: Cold Start
+
+* Duration: \~4 seconds
+* Notable delay from:
+
+  * `System Interface Initialization`: **2.22 seconds** (see Instruments trace)
+  * Represents OS-level startup costs, unrelated to your code
+  * Includes loading dynamic libraries, sandbox setup, and system service prep
+
+![Run 1 Trace](profiling_results/run_1.png)
+
+#### Runs 2–4: Warm Starts
+
+* Duration: \~0.4 seconds
+* Initialization only includes:
+
+  * `Process Creation`: \~400ms
+  * Minimal CPU wait time
+* Actual workload starts and ends quickly
+* Memory bus is already warmed up and cached by OS
+
+![Run 2 Trace](profiling_results/run_2.png)
+![Run 3 Trace](profiling_results/run_3.png)
+![Run 4 Trace](profiling_results/run_4.png)
+
+### 🧠 Analysis Summary
+
+* **First-run overhead is external**: OS startup and system framework loading dominate time.
+* **Subsequent runs reflect real workload**: With cold start costs eliminated, you see consistent performance across warm runs.
+* **Performance difference source**:
+
+  * Not your program logic.
+  * Purely due to OS environment caching and shared library loading.
+
+### ⏱️ CPU Function Trace
+
+The CPU usage breakdown in Instruments shows that the C++ logic consumes time across multiple short functions (shown in assembly due to no debug symbols). No single bottleneck dominates.
+
+![Function Trace](profiling_results/function_trace.png)
+---
