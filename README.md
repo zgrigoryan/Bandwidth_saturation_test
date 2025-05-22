@@ -37,7 +37,7 @@ This project demonstrates a multi-threaded memory stress test program in C++ des
 3. **Compile** with optimizations for best results:
    ```bash
    g++ -std=c++17 -O3 main.cpp -o main
-````
+ ```
 
 From the terminal, run:
 
