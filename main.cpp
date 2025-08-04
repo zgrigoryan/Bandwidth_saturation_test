@@ -1,144 +1,157 @@
-#include <iostream>
-#include <vector>
-#include <thread>
-#include <chrono>
+#include <algorithm>
 #include <atomic>
-#include <algorithm>  
-#include <random>    
+#include <chrono>
+#include <condition_variable>
+#include <cstdint>
+#include <cstring>
 #include <iomanip>
-#include <numeric>
-#include <cstring>    
+#include <iostream>
+#include <mutex>
+#include <random>
+#include <string>
+#include <thread>
+#include <vector>
 
-// # of threads to spawn
-static const int NUM_THREADS = 8;
+// ---------------- Configuration ----------------
+static const int    NUM_THREADS  = 8;                            // default threads
+static const size_t BUFFER_SIZE  = 512ull * 1024ull * 1024ull;   // 512 MB
+static const int    ITERATIONS   = 10;                           // loops over buffer
+// ------------------------------------------------------------
 
-// size of buffer in bytes (512mb)
-static const size_t BUFFER_SIZE = 512ull * 1024ull * 1024ull;
+using Clock = std::chrono::high_resolution_clock;
 
-// # of iterations each thread will run read/write loops
-static const size_t ITERATIONS = 10;
-
-// flag to indicate whether to randomize memory access
-// (default is sequential access)
-// If true, each thread will read/write to random locations
-static bool useRandomAccess = false;
-
-///////////////////////////////////////////////////////
-// Data structure for thread workload
-///////////////////////////////////////////////////////
-struct ThreadWork {
-    char* data;                     
-    size_t size;                    
-    std::atomic<size_t>* global_bytes_processed;
-    size_t iterations;
+struct StartGate {
+    std::mutex m;
+    std::condition_variable cv;
+    bool go = false;
+    void wait() {
+        std::unique_lock<std::mutex> lk(m);
+        cv.wait(lk, [&]{ return go; });
+    }
+    void release() {
+        std::lock_guard<std::mutex> lk(m);
+        go = true;
+        cv.notify_all();
+    }
 };
 
-void memory_stress(ThreadWork work) 
-{
-    char* buffer = work.data;
-    size_t local_size = work.size;
-    size_t iters = work.iterations;
+struct ThreadResult {
+    std::uint64_t bytes_processed = 0;
+    std::uint64_t checksum = 0; // prevent optimizing away
+};
 
-    // when using random access, prepare a shuffled list of indices
-    std::vector<size_t> indices;
-    if (useRandomAccess) {
-        indices.resize(local_size);
-        std::iota(indices.begin(), indices.end(), 0);
-        // shuffle the indices
-        static thread_local std::mt19937 rng(std::random_device{}());
-        std::shuffle(indices.begin(), indices.end(), rng);
-    }
-
-    for (size_t i = 0; i < iters; ++i) {
-        volatile int sum = 0;
-
-        if (useRandomAccess) {
-            // random access mode
-            for (size_t j = 0; j < local_size; ++j) {
-                sum += buffer[ indices[j] ];
-            }
-        } else {
-            // sequential mode
-            for (size_t j = 0; j < local_size; ++j) {
-                sum += buffer[j];
-            }
-        }
-
-
-        if (useRandomAccess) {
-            // random access mode
-            for (size_t j = 0; j < local_size; ++j) {
-                buffer[ indices[j] ] = static_cast<char>(j);
-            }
-        } else {
-            // sequential mode
-            for (size_t j = 0; j < local_size; ++j) {
-                buffer[j] = static_cast<char>(j);
-            }
-        }
-
-        (*work.global_bytes_processed) += (local_size * 2);
-    }
-}
-
-int main(int argc, char* argv[])
-{
-    // check for a --random or -r command line argument
+int main(int argc, char** argv) {
+    // Parse mode
+    bool random_access = false;
     for (int i = 1; i < argc; ++i) {
-        if (std::strcmp(argv[i], "--random") == 0 ||
-            std::strcmp(argv[i], "-r") == 0) 
-        {
-            useRandomAccess = true;
+        if (std::string(argv[i]) == "-r" || std::string(argv[i]) == "--random") {
+            random_access = true;
         }
     }
 
+    // Info banner
     std::cout << "Memory Stress Test\n"
-              << "------------------\n";
-    std::cout << "Buffer size    : " << BUFFER_SIZE << " bytes\n";
-    std::cout << "Iterations     : " << ITERATIONS << "\n";
-    std::cout << "Threads        : " << NUM_THREADS << "\n";
-    std::cout << "Access pattern : " 
-              << (useRandomAccess ? "Random" : "Sequential") << "\n\n";
+              << "------------------\n"
+              << "Buffer size    : " << BUFFER_SIZE << " bytes\n"
+              << "Iterations     : " << ITERATIONS << "\n"
+              << "Threads        : " << NUM_THREADS << "\n"
+              << "Access pattern : " << (random_access ? "Random" : "Sequential") << "\n\n";
 
-    std::vector<char> large_buffer(BUFFER_SIZE, 0);
-    std::atomic<size_t> total_bytes_processed{0};
+    // Allocate big buffer as 64-bit words (helps throughput)
+    const size_t words = BUFFER_SIZE / sizeof(std::uint64_t);
+    if (words == 0) {
+        std::cerr << "BUFFER_SIZE too small.\n";
+        return 1;
+    }
 
-    auto start_time = std::chrono::high_resolution_clock::now();
+    std::vector<std::uint64_t> buf(words, 0);
 
+    // Partition work per thread
+    const size_t words_per_thread = (words + NUM_THREADS - 1) / NUM_THREADS;
+
+    // Thread coordination
+    StartGate gate;
     std::vector<std::thread> threads;
+    std::vector<ThreadResult> results(NUM_THREADS);
+
+    // Work lambda
+    auto worker = [&](int tid) {
+        const size_t begin = std::min(words, static_cast<size_t>(tid) * words_per_thread);
+        const size_t end   = std::min(words, begin + words_per_thread);
+        if (begin >= end) return;
+
+        // Simple PRNG per thread for random indices
+        std::mt19937_64 rng(0xC0FFEEu ^ (static_cast<std::uint64_t>(tid) << 32));
+        std::uniform_int_distribution<size_t> dist(begin, end - 1);
+
+        // Wait for synchronized start
+        gate.wait();
+
+        std::uint64_t local_sum = 0;
+        std::uint64_t bytes = 0;
+
+        // Main loop
+        for (int it = 0; it < ITERATIONS; ++it) {
+            if (!random_access) {
+                // Sequential pass over [begin, end)
+                for (size_t i = begin; i < end; ++i) {
+                    // Read
+                    std::uint64_t v = buf[i];
+                    local_sum += (v ^ (local_sum << 1));
+                    // Write (simple mixing)
+                    buf[i] = v ^ 0xA5A5A5A5A5A5A5A5ull;
+                }
+                bytes += (end - begin) * sizeof(std::uint64_t) * 2ull; // read + write
+            } else {
+                // Random accesses of equal count
+                const size_t cnt = (end - begin);
+                for (size_t k = 0; k < cnt; ++k) {
+                    const size_t i = dist(rng);
+                    std::uint64_t v = buf[i];
+                    local_sum += (v + 0x9E3779B97F4A7C15ull);
+                    buf[i] = v ^ 0xDEADBEEFCAFEBABEull;
+                }
+                bytes += cnt * sizeof(std::uint64_t) * 2ull;
+            }
+        }
+
+        results[tid].bytes_processed = bytes;
+        results[tid].checksum = local_sum; // make side effects observable
+    };
+
+    // Launch threads
     threads.reserve(NUM_THREADS);
-
-    size_t chunk_size = BUFFER_SIZE / NUM_THREADS;
-
     for (int t = 0; t < NUM_THREADS; ++t) {
-        char* chunk_start = large_buffer.data() + t * chunk_size;
-
-        ThreadWork work {
-            chunk_start,
-            chunk_size,
-            &total_bytes_processed,
-            ITERATIONS
-        };
-
-        threads.emplace_back(memory_stress, work);
+        threads.emplace_back(worker, t);
     }
 
-    for (auto &th : threads) {
-        th.join();
+    // Start timer and release gate
+    auto t0 = Clock::now();
+    gate.release();
+
+    // Join
+    for (auto& th : threads) th.join();
+    auto t1 = Clock::now();
+
+    // Aggregate results
+    std::uint64_t total_bytes = 0;
+    std::uint64_t total_checksum = 0;
+    for (const auto& r : results) {
+        total_bytes += r.bytes_processed;
+        total_checksum ^= r.checksum; // combine so it's not optimized away
     }
 
-    auto end_time = std::chrono::high_resolution_clock::now();
-    std::chrono::duration<double> elapsed_sec = end_time - start_time;
+    std::chrono::duration<double> sec = t1 - t0;
+    const double seconds = sec.count();
+    const double mb = static_cast<double>(total_bytes) / (1024.0 * 1024.0);
+    const double mbps = seconds > 0 ? (mb / seconds) : 0.0;
 
-    // throughput in MB/s
-    double bytes_processed = static_cast<double>(total_bytes_processed.load());
-    double bytes_per_sec = bytes_processed / elapsed_sec.count();
-    double megabytes_per_sec = bytes_per_sec / (1024.0 * 1024.0);
-
+    // Report
     std::cout << std::fixed << std::setprecision(2);
-    std::cout << "Total bytes processed : " << bytes_processed << " bytes\n";
-    std::cout << "Elapsed time          : " << elapsed_sec.count() << " s\n";
-    std::cout << "Throughput            : " << megabytes_per_sec << " MB/s\n";
+    std::cout << "Total bytes processed : " << static_cast<long double>(total_bytes) << " bytes\n";
+    std::cout << "Elapsed time          : " << seconds << " s\n";
+    std::cout << "Throughput            : " << mbps << " MB/s\n";
+    std::cout << "Checksum              : 0x" << std::hex << total_checksum << std::dec << "\n";
 
     return 0;
 }
